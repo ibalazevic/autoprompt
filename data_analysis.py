@@ -64,13 +64,13 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', type=str, help='Directory containing TREx relation files')
     parser.add_argument('--data_file', type=str, help='Optional: File containing data for a particular TREx relation')
     parser.add_argument('--out_dir', type=str, help='Directory to store output plots')
-    parser.add_argument('--model_vocab_file', type=str, help="File containing a specific model's vocab")
-    parser.add_argument('--common_vocab_file', type=str, help='File containing common vocab subset')
+    parser.add_argument('--model_vocab', type=str, help="File containing a specific model's vocab")
+    parser.add_argument('--common_vocab', type=str, help='File containing common vocab subset')
     args = parser.parse_args()
 
-    model_vocab = utils.load_vocab(args.model_vocab_file)
+    model_vocab = utils.load_vocab(args.model_vocab)
     print('Model vocab size:', len(model_vocab))
-    common_vocab = utils.load_vocab(args.common_vocab_file)
+    common_vocab = utils.load_vocab(args.common_vocab)
     print('Common vocab size:', len(common_vocab))
     print()
 

@@ -225,6 +225,31 @@ def build_prompt(tokenizer, pair, trigger_tokens, use_ctx, prompt_format, maskin
     return prompt
 
 
+def build_prompt_final(tokenizer, trigger_tokens, prompt_format):
+    prompt_list = []
+
+    # Convert triggers from ids to tokens
+    triggers = tokenizer.convert_ids_to_tokens(trigger_tokens)
+
+    trigger_idx = 0
+    for part in prompt_format:
+        if part == 'X':
+            prompt_list.append('[X]')
+        elif part == 'Y':
+            prompt_list.append('[Y]')
+        else:
+            num_trigger_tokens = int(part)
+            prompt_list.extend(triggers[trigger_idx:trigger_idx+num_trigger_tokens])
+            # Update trigger idx
+            trigger_idx += num_trigger_tokens
+
+    # Add period
+    prompt_list.append('.')
+    # Detokenize output
+    prompt = ' '.join(prompt_list)
+    return prompt
+
+
 def run_model(args):
     np.random.seed(0)
     torch.random.manual_seed(0)
@@ -350,6 +375,7 @@ def run_model(args):
                                                     increase_loss=False,
                                                     num_candidates=args.num_cand)[0]
 
+                    # TODO: figure out if i need this our not!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                     # Update trigger to the best one out of the candidates
                     # old_trigger_tokens = deepcopy(trigger_tokens)
                     # trigger_tokens, best_curr_loss = get_best_candidates(model,
@@ -394,8 +420,8 @@ def run_model(args):
                         counter = 0
                         best_loss_iter = best_curr_loss
                         trigger_tokens = deepcopy(best_curr_trigger_tokens)
-                    elif counter == len(trigger_tokens) * 3:
-                        print('Early stopping: counter equal to len trigger tokens')
+                    elif counter == len(trigger_tokens) * 2:
+                        print('Early stopping: better trigger not found for a while, skipping to next iteration')
                         end_iter = True
                     else:
                         counter += 1
@@ -438,16 +464,18 @@ def run_model(args):
             train_losses.append(train_loss)
             dev_losses.append(dev_loss)
             # Print model prediction on dev data point with current trigger
-            rand_idx = random.randint(0, len(dev_data) - 1) # Follow progress of random dev data pair
-            prompt = build_prompt(tokenizer, dev_data[rand_idx], trigger_tokens, args.use_ctx, prompt_format, masking=True)
-            print('Prompt:', prompt)
+            # rand_idx = random.randint(0, len(dev_data) - 1) # Follow progress of random dev data pair
+            # prompt = build_prompt(tokenizer, dev_data[rand_idx], trigger_tokens, args.use_ctx, prompt_format, masking=True)
+            # print('Prompt:', prompt)
+
             # Sanity check
             # original_log_probs_list, [token_ids], [masked_indices], _, _ = model.get_batch_generation([[prompt]], try_cuda=False)
             # print_sentence_predictions(original_log_probs_list[0], token_ids, model.vocab, masked_indices=masked_indices)
             # get_prediction(model, dev_data[rand_idx], trigger_tokens, trigger_mask, segment_ids, device)
 
         print('Best dev loss: {} (iter {})'.format(round(best_dev_loss, 3), best_iter))
-        print('Best trigger: ', ' '.join(tokenizer.convert_ids_to_tokens(best_trigger_tokens)))
+        # print('Best trigger: ', ' '.join(tokenizer.convert_ids_to_tokens(best_trigger_tokens)))
+        print('Best prompt:', build_prompt_final(tokenizer, best_trigger_tokens, prompt_format))
 
         # Measure elapsed time
         end = time.time()

@@ -64,6 +64,7 @@ def load_TREx_data(args, filename):
                 
                 # If truncated context sentence still has MASK, we need to replace it with object surface but if it left out MASK, it's fine
                 context = context.replace(constants.MASK, obj_surface)
+                # TODO: choose obj (obj_label -> surface) OR obj_surface
                 facts.append((sub, obj, context))
             else:
                 # Facts only consist of sub and obj for unconditional probing
