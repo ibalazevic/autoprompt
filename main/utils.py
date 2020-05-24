@@ -27,21 +27,18 @@ async def map_async(fn, iterator, max_tasks=10, sleep_time=0.01):
     await asyncio.wait(tasks)
 
 
-def load_TREx_data(args, filename):
-    tokenizer = BertTokenizer.from_pretrained('bert-base-cased', do_lower_case=False)
-
+def load_TREx_data(args, filename, tokenizer):
     facts = []
     with open(filename, newline='') as f:
         lines = f.readlines()
         num_invalid_facts = 0
         for line in lines:
             sample = json.loads(line)
-            sub = sample['sub_label']
-            obj = sample['obj_label']
+            sub_label = sample['sub_label']
+            obj_label = sample['obj_label']
 
             # Skip facts with objects that consist of multiple tokens
-            # TODO: different tokenizers split words differently...
-            if len(tokenizer.tokenize(obj)) != 1:
+            if len(tokenizer.tokenize(obj_label)) != 1:
                 num_invalid_facts += 1
                 continue
 
@@ -50,48 +47,26 @@ def load_TREx_data(args, filename):
                 if 'evidences' not in sample:
                     num_invalid_facts += 1
                     continue
-                
                 evidences = sample['evidences']
                 # Randomly pick a context sentence
-                ctx_sents = [(evidence['obj_surface'], evidence['masked_sentence']) for evidence in evidences]
-                ctx_pair = random.choice(ctx_sents)
-                obj_surface, context = ctx_pair
-                context_words = context.split()
-                if len(context_words) > constants.MAX_CONTEXT_LEN:
-                    # If context is too long, use the first X tokens (it's ok if obj isn't included)
-                    context = ' '.join(context_words[:constants.MAX_CONTEXT_LEN])
-                    # print('Sample context too long ({}), truncating.'.format(len(context_words)))
+                obj_surface, masked_sent = random.choice([(evidence['obj_surface'], evidence['masked_sentence']) for evidence in evidences])
+                words = masked_sent.split()
+                if len(words) > constants.MAX_CONTEXT_LEN:
+                    # If the masked sentence is too long, use the first X tokens (it's ok if obj isn't included)
+                    masked_sent = ' '.join(words[:constants.MAX_CONTEXT_LEN])
                 
                 # If truncated context sentence still has MASK, we need to replace it with object surface but if it left out MASK, it's fine
-                context = context.replace(constants.MASK, obj_surface)
-                # TODO: choose obj (obj_label -> surface) OR obj_surface
-                facts.append((sub, obj, context))
+                context = masked_sent.replace(constants.MASK, obj_surface)
+                facts.append((sub_label, obj_label, context))
             else:
                 # Facts only consist of sub and obj for unconditional probing
-                facts.append((sub, obj))
+                facts.append((sub_label, obj_label))
 
         print('Total facts before:', len(lines))
         print('Invalid facts:', num_invalid_facts)
         print('Total facts after:', len(facts))
 
     return facts
-
-
-def get_all_datasets(args):
-    datasets = []
-
-    train_file = os.path.join(args.data_dir, 'train.jsonl')
-    train_data = load_TREx_data(args, train_file)
-    print('Num samples in TREx train data:', len(train_data))
-
-    # dev_file = os.path.join(args.data_dir, 'val.jsonl')
-    dev_file = os.path.join(args.data_dir, 'dev.jsonl')
-    dev_data = load_TREx_data(args, dev_file)
-    print('Num samples in TREx dev data:', len(dev_data))
-
-    datasets.append((train_data, dev_data))
-
-    return datasets
 
 
 def iterate_batches(inputs, batch_size, shuffle=False):
@@ -112,7 +87,7 @@ def iterate_batches(inputs, batch_size, shuffle=False):
         yield inputs[excerpt]
 
 
-def make_batch(tokenizer, batch, trigger_tokens, prompt_format, use_ctx, cls_token, sep_token, mask_token, pad_token, period_token, device):
+def make_batch(tokenizer, batch, trigger_tokens, prompt_format, use_ctx, device):
     """
     For BERT, [CLS] token marks the beginning of a sentence and [SEP] marks separation/end of sentences
     """
@@ -120,6 +95,12 @@ def make_batch(tokenizer, batch, trigger_tokens, prompt_format, use_ctx, cls_tok
     target_tokens_batch = []
     trigger_mask_batch = []
     segment_ids_batch = []
+
+    cls_token = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(tokenizer.cls_token))
+    sep_token = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(tokenizer.sep_token))
+    mask_token = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(tokenizer.mask_token))
+    pad_token = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(tokenizer.pad_token))
+    period_token = tokenizer.convert_tokens_to_ids(tokenizer.tokenize('.'))
     
     for sample in batch:
         # print('PROMPT:', build_prompt(tokenizer, sample, trigger_tokens))
@@ -141,7 +122,7 @@ def make_batch(tokenizer, batch, trigger_tokens, prompt_format, use_ctx, cls_tok
         trigger_idx = 0
         # Add CLS token at the beginning
         source_tokens.extend(cls_token)
-        target_tokens.append(-1)
+        target_tokens.append(constants.MASKED_VALUE)
         trigger_mask.append(0)
         # Add context if probe setting is open-book (use context)
         if use_ctx:
@@ -149,12 +130,12 @@ def make_batch(tokenizer, batch, trigger_tokens, prompt_format, use_ctx, cls_tok
             segment_ids.append(0)
             # Add context tokens
             source_tokens.extend(ctx_tokens)
-            target_tokens.extend([-1] * len(ctx_tokens))
+            target_tokens.extend([constants.MASKED_VALUE] * len(ctx_tokens))
             trigger_mask.extend([0] * len(ctx_tokens))
             segment_ids.extend([0] * len(ctx_tokens))
             # Add SEP token to distinguish sentences
             source_tokens.extend(sep_token)
-            target_tokens.append(-1)
+            target_tokens.append(constants.MASKED_VALUE)
             trigger_mask.append(0)
             segment_ids.append(0)
         
@@ -165,7 +146,7 @@ def make_batch(tokenizer, batch, trigger_tokens, prompt_format, use_ctx, cls_tok
             if part == 'X':
                 # Add subject
                 source_tokens.extend(sub_tokens)
-                target_tokens.extend([-1] * len(sub_tokens))
+                target_tokens.extend([constants.MASKED_VALUE] * len(sub_tokens))
                 trigger_mask.extend([0] * len(sub_tokens))
             elif part == 'Y':
                 # Add MASKED object
@@ -176,18 +157,18 @@ def make_batch(tokenizer, batch, trigger_tokens, prompt_format, use_ctx, cls_tok
                 # Add triggers
                 num_trigger_tokens = int(part)
                 source_tokens.extend(trigger_tokens[trigger_idx:trigger_idx+num_trigger_tokens])
-                target_tokens.extend([-1] * (num_trigger_tokens))
+                target_tokens.extend([constants.MASKED_VALUE] * (num_trigger_tokens))
                 trigger_mask.extend([1] * (num_trigger_tokens))
                 # Update trigger idx
                 trigger_idx += num_trigger_tokens
 
         # Add period at end of prompt
         source_tokens.extend(period_token)
-        target_tokens.append(-1)
+        target_tokens.append(constants.MASKED_VALUE)
         trigger_mask.append(0)
         # Add SEP token at the end
         source_tokens.extend(sep_token)
-        target_tokens.append(-1)
+        target_tokens.append(constants.MASKED_VALUE)
         trigger_mask.append(0)
 
         if use_ctx:
@@ -207,7 +188,7 @@ def make_batch(tokenizer, batch, trigger_tokens, prompt_format, use_ctx, cls_tok
 
     # Pad the batch
     source_tokens_batch = torch.nn.utils.rnn.pad_sequence(source_tokens_batch, batch_first=True, padding_value=pad_token[0])
-    target_tokens_batch = torch.nn.utils.rnn.pad_sequence(target_tokens_batch, batch_first=True, padding_value=-1)
+    target_tokens_batch = torch.nn.utils.rnn.pad_sequence(target_tokens_batch, batch_first=True, padding_value=constants.MASKED_VALUE)
     trigger_mask_batch = torch.nn.utils.rnn.pad_sequence(trigger_mask_batch, batch_first=True)
     segment_ids_batch = torch.nn.utils.rnn.pad_sequence(segment_ids_batch, batch_first=True, padding_value=pad_token[0])
 
@@ -249,14 +230,3 @@ def get_id_from_url(url):
     Extract Wikidata entity id from URL
     """
     return url.split('/')[-1]
-
-
-def replace_nth(s, sub, rep, n):
-    """
-    Replace the Nth occurence of a substring with specified replacement string
-    """
-    where = [m.start() for m in re.finditer(sub, s)][n-1]
-    before = s[:where]
-    after = s[where:]
-    after = after.replace(sub, rep, 1)
-    return before + after
