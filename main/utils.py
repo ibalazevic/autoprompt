@@ -39,6 +39,7 @@ def load_TREx_data(args, filename, tokenizer):
 
             # Skip facts with objects that consist of multiple tokens
             if len(tokenizer.tokenize(obj_label)) != 1:
+                # print(tokenizer.tokenize(obj_label))
                 num_invalid_facts += 1
                 continue
 
@@ -96,14 +97,13 @@ def make_batch(tokenizer, batch, trigger_tokens, prompt_format, use_ctx, device)
     trigger_mask_batch = []
     segment_ids_batch = []
 
-    cls_token = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(tokenizer.cls_token))
-    sep_token = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(tokenizer.sep_token))
-    mask_token = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(tokenizer.mask_token))
-    pad_token = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(tokenizer.pad_token))
-    period_token = tokenizer.convert_tokens_to_ids(tokenizer.tokenize('.'))
+    cls_token = tokenizer.encode(tokenizer.cls_token, add_special_tokens=False)
+    sep_token = tokenizer.encode(tokenizer.sep_token, add_special_tokens=False)
+    mask_token = tokenizer.encode(tokenizer.mask_token, add_special_tokens=False)
+    pad_token = tokenizer.encode(tokenizer.pad_token, add_special_tokens=False)
+    period_token = tokenizer.encode('.', add_special_tokens=False)
     
     for sample in batch:
-        # print('PROMPT:', build_prompt(tokenizer, sample, trigger_tokens))
         source_tokens = []
         target_tokens = []
         trigger_mask = []
@@ -111,13 +111,13 @@ def make_batch(tokenizer, batch, trigger_tokens, prompt_format, use_ctx, device)
 
         if use_ctx:
             sub, obj, ctx = sample
-            sub_tokens = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(sub))
-            obj_tokens = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(obj))
-            ctx_tokens = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(ctx))
+            sub_tokens = tokenizer.encode(sub, add_special_tokens=False, add_prefix_space=False)
+            obj_tokens = tokenizer.encode(obj, add_special_tokens=False, add_prefix_space=False)
+            ctx_tokens = tokenizer.encode(ctx, add_special_tokens=False, add_prefix_space=False)
         else:
             sub, obj = sample
-            sub_tokens = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(sub))
-            obj_tokens = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(obj))
+            sub_tokens = tokenizer.encode(sub, add_special_tokens=False, add_prefix_space=False)
+            obj_tokens = tokenizer.encode(obj, add_special_tokens=False, add_prefix_space=False)
 
         trigger_idx = 0
         # Add CLS token at the beginning
@@ -214,7 +214,7 @@ def get_unique_objects(data, use_ctx=False):
         else:
             sub, obj = sample
         # print('sub: {}, obj: {}, ctx: {}'.format(sub, obj, ctx))
-        objs.add(obj)
+        objs.add(obj.lower())
     return list(objs)
 
 

@@ -1,21 +1,28 @@
 import os
+import sys
 import time
 import random
+import logging
 import argparse
 import numpy as np
 import heapq
-import torch
 import spacy
 import matplotlib.pyplot as plt
+import torch
+import torch.nn.functional as F
 from copy import deepcopy
 from operator import itemgetter
 from transformers import AutoConfig, AutoModelWithLMHead, AutoTokenizer
 import constants
 import utils
 
+import torch.nn.functional as F
+
 ID_TO_POS = {}
 
 nlp = spacy.load("en_core_web_sm")
+
+# logger = logging.getLogger(__name__)
 
 def hotflip_attack(averaged_grad, embedding_matrix, trigger_token_ids,
                    increase_loss=False, num_candidates=1):
@@ -57,86 +64,44 @@ def add_hooks(config, model):
                 module.register_backward_hook(extract_grad_hook)
 
 
-def get_best_candidates(model, tokenizer, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, candidates, beam_size, token_to_flip, obj_token_ids, special_token_ids, device):
-    best_cand_loss = 999999
+def get_best_candidates(model, tokenizer, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, candidates, beam_size, token_to_flip, unique_objects, special_token_ids, device):
+    best_cand_loss = sys.maxsize
     best_cand_trigger_tokens = None
 
-    if beam_size > 1:
-        best_cand_trigger_tokens, best_cand_loss = get_best_candidates_beam_search(model,
-                                                                        tokenizer,
-                                                                        source_tokens,
-                                                                        target_tokens,
-                                                                        trigger_tokens,
-                                                                        trigger_mask,
-                                                                        segment_ids,
-                                                                        attention_mask,
-                                                                        candidates,
-                                                                        args.beam_size,
-                                                                        obj_token_ids,
-                                                                        special_token_ids,
-                                                                        device)
-        best_cand_loss = best_cand_loss.item()
-    else:
-        # Filter candidates
-        filtered_candidates = []
-        for cand in candidates:
-            # Make sure to exclude special tokens like [CLS] from candidates
-            # TODO: add unused BERT tokens to special tokens
-            if cand in special_token_ids:
-                # print("Skipping candidate {} because it's a special symbol {}.".format(cand, tokenizer.convert_ids_to_tokens([cand])))
-                continue
-            # Make sure object/answer token is not included in the trigger -> prevents biased/overfitted triggers for each relation
-            if cand in obj_token_ids:
-                # print("Skipping candidate {} because it's the same as object {}.".format(cand, tokenizer.convert_ids_to_tokens([cand])))
-                continue
-            # Ignore candidates that are proper nouns like Antarctica and ABC
-            # NOTE: Cache proper nouns that appear often because there is a lot of overhead from casting token ids to POS tags with spaCy
-            global ID_TO_POS
-            if cand in ID_TO_POS:
-                pos = ID_TO_POS[cand]
-            else:
-                doc = nlp(tokenizer.convert_ids_to_tokens([cand])[0])
-                pos = doc[0].pos_
-            if pos == 'PROPN':
-                # print('CAND: {}, POS: {}'.format(doc, pos))
-                # print("Skipping candidate {} because it's a proper noun {}.".format(cand, tokenizer.convert_ids_to_tokens([cand])))
-                continue
-            filtered_candidates.append(cand)
+    # Filter candidates
+    filtered_candidates = []
+    for cand in candidates:
+        print('CAND:', cand, tokenizer.decode([cand]))
+        # Make sure to exclude special tokens like [CLS] from candidates
+        if cand in special_token_ids:
+            print("Skipping candidate {} because it's a special symbol: {}".format(cand, tokenizer.decode([cand])))
+            continue
 
-        for cand in filtered_candidates:
-            # Replace current token with new candidate
-            cand_trigger_tokens = deepcopy(trigger_tokens)
-            cand_trigger_tokens[token_to_flip] = cand
+        # Make sure object/answer token is not included in the trigger -> prevents biased/overfitted triggers for each relation
+        if tokenizer.decode([cand]).strip().lower() in unique_objects:
+            print("Skipping candidate {} because it's the same as a gold object: {}".format(cand, tokenizer.decode([cand])))
+            continue
 
-            # Get loss of candidate and update current best if it has lower loss
-            with torch.no_grad():
-                cand_loss = get_loss(model, source_tokens, target_tokens, cand_trigger_tokens, trigger_mask, segment_ids, attention_mask, device).cpu().numpy()
-                if cand_loss < best_cand_loss:
-                    best_cand_loss = cand_loss
-                    best_cand_trigger_tokens = deepcopy(cand_trigger_tokens)
+        # Ignore capitalized word pieces and hopefully this heuristic will deal with proper nouns like Antarctica and ABC
+        if any(c.isupper() for c in tokenizer.decode([cand])):
+            print("Skipping candidate {} because it's probably a proper noun: {}".format(cand, tokenizer.decode([cand])))
+            continue
+        
+        filtered_candidates.append(cand)
+
+    for cand in filtered_candidates:
+        # Replace current token with new candidate
+        cand_trigger_tokens = deepcopy(trigger_tokens)
+        cand_trigger_tokens[token_to_flip] = cand
+
+        # Get loss of candidate and update current best if it has lower loss
+        with torch.no_grad():
+            cand_loss = get_loss(model, source_tokens, target_tokens, cand_trigger_tokens, trigger_mask, segment_ids, attention_mask, device).detach().cpu().numpy()
+            if cand_loss < best_cand_loss:
+                best_cand_loss = cand_loss
+                best_cand_trigger_tokens = deepcopy(cand_trigger_tokens)
     
     return best_cand_trigger_tokens, best_cand_loss
-
-
-def get_best_candidates_beam_search(model, tokenizer, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, candidates, beam_size, obj_token_ids, special_token_ids, device):
-    """"
-    Given the list of candidate trigger token ids (of number of trigger words by number of candidates
-    per word), it finds the best new candidate trigger.
-    This performs beam search in a left to right fashion.
-    """
-    # first round, no beams, just get the loss for each of the candidates in index 0.
-    # (indices 1-end are just the old trigger)
-    loss_per_candidate = get_loss_per_candidate(0, model, tokenizer, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, candidates, special_token_ids, obj_token_ids, device)
-    # maximize the loss
-    top_candidates = heapq.nsmallest(beam_size, loss_per_candidate, key=itemgetter(1))
-
-    # top_candidates now contains beam_size trigger sequences, each with a different 0th token
-    for idx in range(1, len(trigger_tokens)): # for all trigger tokens, skipping the 0th (we did it above)
-        loss_per_candidate = []
-        for cand, _ in top_candidates: # for all the beams, try all the candidates at idx 
-            loss_per_candidate.extend(get_loss_per_candidate(idx, model, tokenizer, source_tokens, target_tokens, cand, trigger_mask, segment_ids, attention_mask, candidates, special_token_ids, obj_token_ids, device))
-        top_candidates = heapq.nsmallest(beam_size, loss_per_candidate, key=itemgetter(1))
-    return min(top_candidates, key=itemgetter(1))
 
 
 def get_loss(model, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, device):
@@ -144,52 +109,37 @@ def get_loss(model, source_tokens, target_tokens, trigger_tokens, trigger_mask, 
     trigger_tokens = torch.tensor(trigger_tokens, device=device).repeat(batch_size, 1)
     # Make sure to not modify the original source tokens
     src = source_tokens.clone()
-    src = src.masked_scatter_(trigger_mask.to(torch.uint8), trigger_tokens).to(device)
+    src = src.masked_scatter_(trigger_mask.to(torch.bool), trigger_tokens).to(device)
     dst = target_tokens.to(device)
     outputs = model(src, masked_lm_labels=dst, token_type_ids=segment_ids, attention_mask=attention_mask)
     loss, pred_scores = outputs[:2]
     return loss
 
 
-def get_loss_per_candidate(index, model, tokenizer, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, candidates, special_token_ids, obj_token_ids, device):
-    """
-    For a particular index, the function tries all of the candidate tokens for that index.
-    The function returns a list containing the candidate triggers it tried, along with their loss.
-    """
-    loss_per_candidate = []
-    # loss for the trigger without trying the candidates
-    with torch.no_grad(): # NOTE: Don't compute gradients to save memory
-        curr_loss = get_loss(model, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, device)
-        loss_per_candidate.append((deepcopy(trigger_tokens), curr_loss))
-        for cand_id in range(len(candidates[0])):
-            cand = candidates[index][cand_id]
-            # Make sure to exclude special tokens like [CLS] from candidates
-            # TODO: add unused BERT tokens to special tokens
-            if cand in special_token_ids:
-                # print("Skipping candidate {} because it's a special symbol {}.".format(cand, tokenizer.convert_ids_to_tokens([cand])))
-                continue
-            # Make sure object/answer token is not included in the trigger -> prevents biased/overfitted triggers for each relation
-            if cand in obj_token_ids:
-                # print("Skipping candidate {} because it's the same as object {}.".format(cand, tokenizer.convert_ids_to_tokens([cand])))
-                continue
-            # Ignore candidates that are proper nouns like Antarctica and ABC
-            # NOTE: Cache proper nouns that appear often because there is a lot of overhead from casting token ids to POS tags with spaCy
-            global ID_TO_POS
-            if cand in ID_TO_POS:
-                pos_tag = ID_TO_POS[cand]
-            else:
-                doc = nlp(tokenizer.convert_ids_to_tokens([cand])[0])
-                pos = [token.pos_ for token in doc]
-                pos_tag = pos[0]
-            if pos_tag == 'PROPN':
-                # print("Skipping candidate {} because it's a proper noun {}.".format(cand, tokenizer.convert_ids_to_tokens([cand])))
-                continue
+def get_prediction(model, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, device):
+    batch_size = source_tokens.size()[0]
+    trigger_tokens = torch.tensor(trigger_tokens, device=device).repeat(batch_size, 1)
+    # Make sure to not modify the original source tokens
+    src = source_tokens.clone()
+    src = src.masked_scatter_(trigger_mask.to(torch.bool), trigger_tokens).to(device)
+    dst = target_tokens.to(device)
 
-            trigger_token_ids_one_replaced = deepcopy(trigger_tokens) # copy trigger
-            trigger_token_ids_one_replaced[index] = cand # replace one token
-            loss = get_loss(model, source_tokens, target_tokens, trigger_token_ids_one_replaced, trigger_mask, segment_ids, attention_mask, device)
-            loss_per_candidate.append((deepcopy(trigger_token_ids_one_replaced), loss))
-        return loss_per_candidate
+    src = src[0].unsqueeze(0)
+    dst = dst[0].unsqueeze(0)
+    segment_ids = segment_ids[0].unsqueeze(0)
+    attention_mask = attention_mask[0].unsqueeze(0)
+
+    outputs = model(src, masked_lm_labels=dst, token_type_ids=segment_ids, attention_mask=attention_mask)
+    loss, pred_scores = outputs[:2]
+    print('PRED SCORES:', pred_scores.size())
+    log_probs = F.log_softmax(pred_scores, dim=-1).cpu()
+
+    masked_index = torch.where(dst.squeeze(0) != constants.MASKED_VALUE)[0].detach().cpu().numpy()
+    print('MASKED INDEX:', masked_index)
+
+    logits = log_probs[:, masked_index, :]
+    print('LOGITS:', logits, logits.size())
+    # print('LOG PROBS:', log_probs, log_probs.size())
 
 
 def build_prompt(tokenizer, pair, trigger_tokens, use_ctx, prompt_format, masking=False):
@@ -202,10 +152,12 @@ def build_prompt(tokenizer, pair, trigger_tokens, use_ctx, prompt_format, maskin
         sub, obj = pair
 
     if masking:
-        obj = constants.MASK
+        obj = tokenizer.mask_token
 
     # Convert triggers from ids to tokens
-    triggers = tokenizer.convert_ids_to_tokens(trigger_tokens)
+    print('TRIGGER TOKENS:', trigger_tokens)
+    triggers = tokenizer.decode(trigger_tokens)
+    print('TRIGGERS:', triggers)
 
     if use_ctx:
         prompt_list.append(context)
@@ -218,9 +170,11 @@ def build_prompt(tokenizer, pair, trigger_tokens, use_ctx, prompt_format, maskin
             prompt_list.append(obj)
         else:
             num_trigger_tokens = int(part)
-            prompt_list.extend(triggers[trigger_idx:trigger_idx+num_trigger_tokens])
+            # TODO: FIX THIS FOR BERT!!!!!!!!!!!!!!!!!!!!!!!!!!
+            # prompt_list.extend(triggers[trigger_idx:trigger_idx+num_trigger_tokens])
             # Update trigger idx
-            trigger_idx += num_trigger_tokens
+            # trigger_idx += num_trigger_tokens
+            prompt_list.append(triggers)
 
     # Add period
     prompt_list.append('.')
@@ -273,6 +227,10 @@ def set_seed(seed: int):
 
 
 def run_model(args):
+    # TODO: REMOVE
+    roberta = torch.hub.load('pytorch/fairseq', 'roberta.base')
+    roberta.eval()
+
     set_seed(0)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     config, model, tokenizer = load_pretrained(args.model_name)
@@ -292,18 +250,24 @@ def run_model(args):
     # Load TREx train and dev data
     train_file = os.path.join(args.data_dir, 'train.jsonl')
     train_data = utils.load_TREx_data(args, train_file, tokenizer)
-    print('Num samples in train data:', len(train_data))
+    print('Num samples in train data: {}'.format(len(train_data)))
     dev_file = os.path.join(args.data_dir, 'dev.jsonl')
     dev_data = utils.load_TREx_data(args, dev_file, tokenizer)
-    print('Num samples in dev data:', len(dev_data))
+    print('Num samples in dev data: {}'.format(len(dev_data)))
 
-    # Get all unique objects from train data
+    # Get all unique objects from train data and check if hotflip candidates == object later on
     unique_objects = utils.get_unique_objects(train_data, args.use_ctx)
-    # Store token ids for each object in batch to check if candidate == object later on
-    obj_token_ids = tokenizer.convert_tokens_to_ids(unique_objects)
+    print('Unique objects:', unique_objects)
 
-    # Initialize special tokens
-    special_token_ids = [tokenizer.cls_token, tokenizer.unk_token, tokenizer.sep_token, tokenizer.mask_token, tokenizer.pad_token]
+    # NOTE: add_prefix_space has no effect on special tokens
+    # TODO: add unused BERT tokens to special tokens
+    special_token_ids = [
+        tokenizer.encode(tokenizer.cls_token, add_special_tokens=False),
+        tokenizer.encode(tokenizer.unk_token, add_special_tokens=False),
+        tokenizer.encode(tokenizer.sep_token, add_special_tokens=False),
+        tokenizer.encode(tokenizer.mask_token, add_special_tokens=False),
+        tokenizer.encode(tokenizer.pad_token, add_special_tokens=False)
+    ]
 
     """
     Trigger Initialization Options
@@ -323,6 +287,7 @@ def run_model(args):
         print('Trigger initialization: RANDOM')
         init_token = tokenizer.convert_tokens_to_ids([constants.INIT_WORD])[0]
         trigger_tokens = np.array([init_token] * trigger_token_length)
+        # trigger_tokens = tokenizer.encode([constants.INIT_WORD] * trigger_token_length, add_special_tokens=False, add_prefix_space=True)
     print('Initial trigger tokens: {}, Length: {}'.format(trigger_tokens, trigger_token_length))
 
     best_dev_loss = 999999
@@ -334,7 +299,7 @@ def run_model(args):
     count = 0
 
     for i in range(args.iters):
-        print('Iteration:', i)
+        print('Iteration: {}'.format(i))
         end_iter = False
         best_loss_iter = 999999
         counter = 0
@@ -344,13 +309,14 @@ def run_model(args):
         for batch in utils.iterate_batches(train_data, args.bsz, True):
             # Tokenize and pad batch
             source_tokens, target_tokens, trigger_mask, segment_ids, attention_mask = utils.make_batch(tokenizer, batch, trigger_tokens, prompt_format, args.use_ctx, device)
-            # print('SOURCE TOKENS:', source_tokens, source_tokens.size())
-            # print('TARGET TOKENS:', target_tokens, target_tokens.size())
-            # print('TRIGGER MASK:', trigger_mask, trigger_mask.size())
-            # print('SEGMENT IDS:', segment_ids, segment_ids.size())
-            # print('ATTENTION MASK:', attention_mask, attention_mask.size())
+            print('SOURCE TOKENS:', source_tokens, source_tokens.size())#, tokenizer.decode(source_tokens.squeeze(0)))
+            print('TARGET TOKENS:', target_tokens, target_tokens.size())
+            print('TRIGGER MASK:', trigger_mask, trigger_mask.size())
+            print('SEGMENT IDS:', segment_ids, segment_ids.size())
+            print('ATTENTION MASK:', attention_mask, attention_mask.size())
 
             # Iteratively update tokens in the trigger
+            prev_best_curr_loss = 0
             for token_to_flip in range(trigger_token_length):
                 # Early stopping if no improvements to trigger
                 if end_iter:
@@ -364,27 +330,17 @@ def run_model(args):
                 grad = extracted_grads[0]
                 bsz, _, emb_dim = grad.size() # middle dimension is number of trigger tokens
                 extracted_grads = [] # clear gradients from past iterations
-                trigger_mask_matrix = trigger_mask.unsqueeze(-1).repeat(1, 1, emb_dim).to(torch.uint8).to(device)
+                trigger_mask_matrix = trigger_mask.unsqueeze(-1).repeat(1, 1, emb_dim).to(torch.bool).to(device)
                 grad = torch.masked_select(grad, trigger_mask_matrix).view(bsz, -1, emb_dim)
 
-                if args.beam_size > 1:
-                    # Get "averaged" gradient w.r.t. ALL trigger tokens
-                    averaged_grad = grad.sum(dim=0)
-                    # Use hotflip (linear approximation) attack to get the top num_candidates
-                    candidates = hotflip_attack(averaged_grad,
-                                                embedding_weight,
-                                                trigger_tokens,
-                                                increase_loss=False,
-                                                num_candidates=args.num_cand)                        
-                else:
-                    # Get averaged gradient of current trigger token
-                    averaged_grad = grad.sum(dim=0)[token_to_flip].unsqueeze(0)
-                    # Use hotflip (linear approximation) attack to get the top num_candidates
-                    candidates = hotflip_attack(averaged_grad,
-                                                embedding_weight,
-                                                [trigger_tokens[token_to_flip]],
-                                                increase_loss=False,
-                                                num_candidates=args.num_cand)[0]
+                # Get averaged gradient of current trigger token
+                averaged_grad = grad.sum(dim=0)[token_to_flip].unsqueeze(0)
+                # Use hotflip (linear approximation) attack to get the top num_candidates
+                candidates = hotflip_attack(averaged_grad,
+                                            embedding_weight,
+                                            [trigger_tokens[token_to_flip]],
+                                            increase_loss=False,
+                                            num_candidates=args.num_cand)[0]
 
                 best_curr_trigger_tokens, best_curr_loss = get_best_candidates(model,
                                                                     tokenizer,
@@ -397,9 +353,15 @@ def run_model(args):
                                                                     candidates,
                                                                     args.beam_size,
                                                                     token_to_flip,
-                                                                    obj_token_ids,
+                                                                    unique_objects,
                                                                     special_token_ids,
                                                                     device)
+
+                # If ALL candidates were invalid, replace best_curr_loss with previous best_curr_loss 
+                if best_curr_loss == sys.maxsize:
+                    best_curr_loss = prev_best_curr_loss
+
+                prev_best_curr_loss = best_curr_loss
                 losses_batch_train.append(best_curr_loss)
 
                 if best_curr_loss < best_loss_iter:
@@ -429,6 +391,9 @@ def run_model(args):
                 losses_batch_dev.append(loss.item())
         dev_loss = np.mean(losses_batch_dev)
 
+        # TODO: Print model's prediction on dev sample with current trigger
+        # get_prediction(model, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, device)
+
         # Early stopping on dev set
         if dev_loss < best_dev_loss:
             best_dev_loss = dev_loss
@@ -442,16 +407,17 @@ def run_model(args):
             break
 
         # Only print out train loss, dev loss, and sample prediction before early stopping
-        print('Trigger tokens:', tokenizer.convert_ids_to_tokens(trigger_tokens))
-        print('Train loss:', train_loss)
-        print('Dev loss:', dev_loss)
+        print('Trigger tokens: {}'.format(tokenizer.decode(trigger_tokens)))
+        print('Train loss: {}'.format(train_loss))
+        print('Dev loss: {}'.format(dev_loss))
         # Store train loss of last batch, which should be the best because we update the same trigger
         train_losses.append(train_loss)
         dev_losses.append(dev_loss)
         # Print model prediction on dev data point with current trigger
-        # rand_idx = random.randint(0, len(dev_data) - 1) # Follow progress of random dev data pair
-        # prompt = build_prompt(tokenizer, dev_data[rand_idx], trigger_tokens, args.use_ctx, prompt_format, masking=True)
-        # print('Prompt:', prompt)
+        rand_idx = random.randint(0, len(dev_data) - 1) # Follow progress of random dev data pair
+        prompt = build_prompt(tokenizer, dev_data[rand_idx], trigger_tokens, args.use_ctx, prompt_format, masking=True)
+        print('Prompt:', prompt)
+        print('RoBERTa predictions:', roberta.fill_mask(prompt, topk=3))
         # Sanity check
         # original_log_probs_list, [token_ids], [masked_indices], _, _ = model.get_batch_generation([[prompt]], try_cuda=False)
         # print_sentence_predictions(original_log_probs_list[0], token_ids, model.vocab, masked_indices=masked_indices)
@@ -459,7 +425,7 @@ def run_model(args):
 
     print('Best dev loss: {} (iter {})'.format(round(best_dev_loss, 3), best_iter))
     # print('Best trigger: ', ' '.join(tokenizer.convert_ids_to_tokens(best_trigger_tokens)))
-    print('Best prompt:', build_prompt_final(tokenizer, best_trigger_tokens, prompt_format))
+    print('Best prompt: {}'.format(build_prompt_final(tokenizer, best_trigger_tokens, prompt_format)))
 
     # Measure elapsed time
     end = time.time()
@@ -490,4 +456,11 @@ if __name__ == '__main__':
     parser.add_argument('--manual', type=str, help='Manual prompt')
     parser.add_argument('--debug', default=False, action='store_true')
     args = parser.parse_args()
+
+    # if args.debug:
+    #     level = logging.DEBUG
+    # else:
+    #     level = logging.INFO
+    # logging.basicConfig(stream=sys.stdout, level=level)
+
     run_model(args)
