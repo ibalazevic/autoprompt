@@ -16,10 +16,6 @@ from transformers import AutoConfig, AutoModelWithLMHead, AutoTokenizer
 import constants
 import utils
 
-import torch.nn.functional as F
-
-ID_TO_POS = {}
-
 nlp = spacy.load("en_core_web_sm")
 
 # logger = logging.getLogger(__name__)
@@ -64,27 +60,27 @@ def add_hooks(config, model):
                 module.register_backward_hook(extract_grad_hook)
 
 
-def get_best_candidates(model, tokenizer, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, candidates, beam_size, token_to_flip, unique_objects, special_token_ids, device):
+def get_best_candidates(model, config, tokenizer, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, candidates, beam_size, token_to_flip, unique_objects, special_token_ids, device):
     best_cand_loss = sys.maxsize
-    best_cand_trigger_tokens = None
+    best_cand_trigger_tokens = trigger_tokens
 
     # Filter candidates
     filtered_candidates = []
     for cand in candidates:
-        print('CAND:', cand, tokenizer.decode([cand]))
+        # print('CAND:', cand, tokenizer.decode([cand]))
         # Make sure to exclude special tokens like [CLS] from candidates
         if cand in special_token_ids:
-            print("Skipping candidate {} because it's a special symbol: {}".format(cand, tokenizer.decode([cand])))
+            # print("Skipping candidate {} because it's a special symbol: {}".format(cand, tokenizer.decode([cand])))
             continue
 
         # Make sure object/answer token is not included in the trigger -> prevents biased/overfitted triggers for each relation
         if tokenizer.decode([cand]).strip().lower() in unique_objects:
-            print("Skipping candidate {} because it's the same as a gold object: {}".format(cand, tokenizer.decode([cand])))
+            # print("Skipping candidate {} because it's the same as a gold object: {}".format(cand, tokenizer.decode([cand])))
             continue
 
         # Ignore capitalized word pieces and hopefully this heuristic will deal with proper nouns like Antarctica and ABC
         if any(c.isupper() for c in tokenizer.decode([cand])):
-            print("Skipping candidate {} because it's probably a proper noun: {}".format(cand, tokenizer.decode([cand])))
+            # print("Skipping candidate {} because it's probably a proper noun: {}".format(cand, tokenizer.decode([cand])))
             continue
         
         filtered_candidates.append(cand)
@@ -96,105 +92,75 @@ def get_best_candidates(model, tokenizer, source_tokens, target_tokens, trigger_
 
         # Get loss of candidate and update current best if it has lower loss
         with torch.no_grad():
-            cand_loss = get_loss(model, source_tokens, target_tokens, cand_trigger_tokens, trigger_mask, segment_ids, attention_mask, device).detach().cpu().numpy()
+            cand_loss = get_loss(model, config, source_tokens, target_tokens, cand_trigger_tokens, trigger_mask, segment_ids, attention_mask, device).item()
             if cand_loss < best_cand_loss:
                 best_cand_loss = cand_loss
                 best_cand_trigger_tokens = deepcopy(cand_trigger_tokens)
-    
+
     return best_cand_trigger_tokens, best_cand_loss
 
 
-def get_loss(model, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, device):
+def get_loss(model, config, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, device):
     batch_size = source_tokens.size()[0]
-    trigger_tokens = torch.tensor(trigger_tokens, device=device).repeat(batch_size, 1)
+    triggers = deepcopy(trigger_tokens)
+    triggers = torch.tensor(triggers, device=device).repeat(batch_size, 1)
     # Make sure to not modify the original source tokens
     src = source_tokens.clone()
-    src = src.masked_scatter_(trigger_mask.to(torch.bool), trigger_tokens).to(device)
+    src = src.masked_scatter_(trigger_mask.to(torch.bool), triggers).to(device)
     dst = target_tokens.to(device)
-    outputs = model(src, masked_lm_labels=dst, token_type_ids=segment_ids, attention_mask=attention_mask)
+    if config.model_type == 'roberta':
+        # RoBERTa doesn’t have token_type_ids, you don’t need to indicate which token belongs to which segment. Just separate your segments with the separation token tokenizer.sep_token (or </s>)
+        outputs = model(src, masked_lm_labels=dst, attention_mask=attention_mask)
+    else:
+        outputs = model(src, masked_lm_labels=dst, token_type_ids=segment_ids, attention_mask=attention_mask)
     loss, pred_scores = outputs[:2]
     return loss
 
 
-def get_prediction(model, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, device):
+def print_prediction(model, config, tokenizer, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, device):
     batch_size = source_tokens.size()[0]
-    trigger_tokens = torch.tensor(trigger_tokens, device=device).repeat(batch_size, 1)
+    triggers = deepcopy(trigger_tokens)
+    triggers = torch.tensor(triggers, device=device).repeat(batch_size, 1)
     # Make sure to not modify the original source tokens
     src = source_tokens.clone()
-    src = src.masked_scatter_(trigger_mask.to(torch.bool), trigger_tokens).to(device)
+    src = src.masked_scatter_(trigger_mask.to(torch.bool), triggers).to(device)
     dst = target_tokens.to(device)
 
-    src = src[0].unsqueeze(0)
-    dst = dst[0].unsqueeze(0)
-    segment_ids = segment_ids[0].unsqueeze(0)
-    attention_mask = attention_mask[0].unsqueeze(0)
+    # Get first sample of batch to evaluate
+    src = src[0]
+    dst = dst[0]
+    segment_ids = segment_ids[0]
+    attention_mask = attention_mask[0]
+    print('\nInput:', tokenizer.decode(src))
+    masked_idx = torch.where(dst.squeeze() != constants.MASKED_VALUE)[0].item()
 
-    outputs = model(src, masked_lm_labels=dst, token_type_ids=segment_ids, attention_mask=attention_mask)
+    if config.model_type == 'roberta':
+        outputs = model(src.unsqueeze(0), masked_lm_labels=dst.unsqueeze(0), attention_mask=attention_mask.unsqueeze(0))
+    else:
+        outputs = model(src.unsqueeze(0), masked_lm_labels=dst.unsqueeze(0), token_type_ids=segment_ids.unsqueeze(0), attention_mask=attention_mask.unsqueeze(0))
     loss, pred_scores = outputs[:2]
-    print('PRED SCORES:', pred_scores.size())
     log_probs = F.log_softmax(pred_scores, dim=-1).cpu()
 
-    masked_index = torch.where(dst.squeeze(0) != constants.MASKED_VALUE)[0].detach().cpu().numpy()
-    print('MASKED INDEX:', masked_index)
+    # NOTE: BERT -> convert_ids_to_tokens; RoBERTa -> decode
+    # print('dst:', tokenizer.convert_ids_to_tokens(dst.tolist()[masked_idx]))
+    gold_obj_id = dst.tolist()[masked_idx]
+    print('Gold object:', tokenizer.decode(gold_obj_id), gold_obj_id)
+    logits = log_probs[:, masked_idx, :]
+    value_max_probs, index_max_probs = torch.topk(logits, k=3)
+    print('Top K predicted objects:')
+    for i in index_max_probs.squeeze():
+        token = tokenizer.decode([i])
+        print(token, i.item())
+    print()
 
-    logits = log_probs[:, masked_index, :]
-    print('LOGITS:', logits, logits.size())
-    # print('LOG PROBS:', log_probs, log_probs.size())
 
-
-def build_prompt(tokenizer, pair, trigger_tokens, use_ctx, prompt_format, masking=False):
+def build_prompt(config, tokenizer, trigger_tokens, prompt_format):
     prompt_list = []
 
-    if use_ctx:
-        sub, obj, context = pair
-        # print('SUBJECT: {}, OBJECT: {}, CONTEXT: {}'.format(sub, obj, context))
-    else:
-        sub, obj = pair
+    # Convert trigger from ids to tokens
+    trigger_list = tokenizer.convert_ids_to_tokens(trigger_tokens)
 
-    if masking:
-        obj = tokenizer.mask_token
-
-    # Convert triggers from ids to tokens
-    print('TRIGGER TOKENS:', trigger_tokens)
-    triggers = tokenizer.decode(trigger_tokens)
-    print('TRIGGERS:', triggers)
-
-    if use_ctx:
-        prompt_list.append(context)
-
-    trigger_idx = 0
-    for part in prompt_format:
-        if part == 'X':
-            prompt_list.append(sub)
-        elif part == 'Y':
-            prompt_list.append(obj)
-        else:
-            num_trigger_tokens = int(part)
-            # TODO: FIX THIS FOR BERT!!!!!!!!!!!!!!!!!!!!!!!!!!
-            # prompt_list.extend(triggers[trigger_idx:trigger_idx+num_trigger_tokens])
-            # Update trigger idx
-            # trigger_idx += num_trigger_tokens
-            prompt_list.append(triggers)
-
-    # Add period
-    prompt_list.append('.')
-    # Detokenize output and remove hashtags in subwords
-    prompt = ' '.join(prompt_list)
-    # Combine subwords with the previous word
-    # TODO: I DONT THINK ROBERTA HAS HASHTAGS IN SUBWORDSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
-    prompt = prompt.replace(' ##', '')
-    # Remove hashtags from subword if its in the beginning of the prompt
-    prompt = prompt.replace('##', '')
-    return prompt
-
-
-def build_prompt_final(tokenizer, trigger_tokens, prompt_format):
-    prompt_list = []
-
-    # Convert triggers from ids to tokens
-    triggers = tokenizer.convert_ids_to_tokens(trigger_tokens)
-
-    trigger_idx = 0
+    idx = 0
     for part in prompt_format:
         if part == 'X':
             prompt_list.append('[X]')
@@ -202,14 +168,24 @@ def build_prompt_final(tokenizer, trigger_tokens, prompt_format):
             prompt_list.append('[Y]')
         else:
             num_trigger_tokens = int(part)
-            prompt_list.extend(triggers[trigger_idx:trigger_idx+num_trigger_tokens])
-            # Update trigger idx
-            trigger_idx += num_trigger_tokens
+            if config.model_type == 'roberta':
+                tokens = trigger_tokens[idx:idx+num_trigger_tokens]
+                prompt_list.extend([tokenizer.decode([t]) for t in tokens])
+            else:
+                prompt_list.extend(trigger_list[idx:idx+num_trigger_tokens])
+            idx += num_trigger_tokens
 
     # Add period
     prompt_list.append('.')
-    # Detokenize output
-    prompt = ' '.join(prompt_list)
+    if config.model_type == 'roberta':
+        prompt = ''.join(prompt_list)
+    else:
+        prompt = ' '.join(prompt_list)
+        # # For BERT, combine subwords with the previous word
+        # prompt = prompt.replace(' ##', '')
+        # # Remove hashtags from subword if its in the beginning of the prompt
+        # prompt = prompt.replace('##', '')
+    
     return prompt
 
 
@@ -227,10 +203,6 @@ def set_seed(seed: int):
 
 
 def run_model(args):
-    # TODO: REMOVE
-    roberta = torch.hub.load('pytorch/fairseq', 'roberta.base')
-    roberta.eval()
-
     set_seed(0)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     config, model, tokenizer = load_pretrained(args.model_name)
@@ -262,11 +234,11 @@ def run_model(args):
     # NOTE: add_prefix_space has no effect on special tokens
     # TODO: add unused BERT tokens to special tokens
     special_token_ids = [
-        tokenizer.encode(tokenizer.cls_token, add_special_tokens=False),
-        tokenizer.encode(tokenizer.unk_token, add_special_tokens=False),
-        tokenizer.encode(tokenizer.sep_token, add_special_tokens=False),
-        tokenizer.encode(tokenizer.mask_token, add_special_tokens=False),
-        tokenizer.encode(tokenizer.pad_token, add_special_tokens=False)
+        tokenizer.cls_token_id,
+        tokenizer.unk_token_id,
+        tokenizer.sep_token_id,
+        tokenizer.mask_token_id,
+        tokenizer.pad_token_id
     ]
 
     """
@@ -285,9 +257,11 @@ def run_model(args):
         trigger_tokens = tokenizer.convert_tokens_to_ids(init_tokens)
     else:
         print('Trigger initialization: RANDOM')
-        init_token = tokenizer.convert_tokens_to_ids([constants.INIT_WORD])[0]
-        trigger_tokens = np.array([init_token] * trigger_token_length)
+        # TODO: figure out how to properly initialize random trigger!!!!!!!!!!!!!!!!!
+        # init_token = tokenizer.convert_tokens_to_ids([constants.INIT_WORD])[0]
+        # trigger_tokens = np.array([init_token] * trigger_token_length)
         # trigger_tokens = tokenizer.encode([constants.INIT_WORD] * trigger_token_length, add_special_tokens=False, add_prefix_space=True)
+        trigger_tokens = tokenizer.encode(' '.join([constants.INIT_WORD] * trigger_token_length), add_special_tokens=False, add_prefix_space=True)
     print('Initial trigger tokens: {}, Length: {}'.format(trigger_tokens, trigger_token_length))
 
     best_dev_loss = 999999
@@ -299,6 +273,7 @@ def run_model(args):
     count = 0
 
     for i in range(args.iters):
+        print('-' * 100)
         print('Iteration: {}'.format(i))
         end_iter = False
         best_loss_iter = 999999
@@ -309,11 +284,11 @@ def run_model(args):
         for batch in utils.iterate_batches(train_data, args.bsz, True):
             # Tokenize and pad batch
             source_tokens, target_tokens, trigger_mask, segment_ids, attention_mask = utils.make_batch(tokenizer, batch, trigger_tokens, prompt_format, args.use_ctx, device)
-            print('SOURCE TOKENS:', source_tokens, source_tokens.size())#, tokenizer.decode(source_tokens.squeeze(0)))
-            print('TARGET TOKENS:', target_tokens, target_tokens.size())
-            print('TRIGGER MASK:', trigger_mask, trigger_mask.size())
-            print('SEGMENT IDS:', segment_ids, segment_ids.size())
-            print('ATTENTION MASK:', attention_mask, attention_mask.size())
+            # print('SOURCE TOKENS:', source_tokens, source_tokens.size())
+            # print('TARGET TOKENS:', target_tokens, target_tokens.size())
+            # print('TRIGGER MASK:', trigger_mask, trigger_mask.size())
+            # print('SEGMENT IDS:', segment_ids, segment_ids.size())
+            # print('ATTENTION MASK:', attention_mask, attention_mask.size())
 
             # Iteratively update tokens in the trigger
             prev_best_curr_loss = 0
@@ -323,7 +298,7 @@ def run_model(args):
                     continue
 
                 model.zero_grad() # clear previous gradients
-                loss = get_loss(model, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, device)
+                loss = get_loss(model, config, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, device)
                 loss.backward() # compute derivative of loss w.r.t. params using backprop
 
                 global extracted_grads
@@ -343,6 +318,7 @@ def run_model(args):
                                             num_candidates=args.num_cand)[0]
 
                 best_curr_trigger_tokens, best_curr_loss = get_best_candidates(model,
+                                                                    config,
                                                                     tokenizer,
                                                                     source_tokens,
                                                                     target_tokens,
@@ -378,7 +354,7 @@ def run_model(args):
                 if args.debug:
                     input()
 
-        # Compute average train loss across all batches
+        # Get best train loss across all batches
         train_loss = best_loss_iter
 
         # Evaluate on dev set
@@ -387,12 +363,13 @@ def run_model(args):
             source_tokens, target_tokens, trigger_mask, segment_ids, attention_mask = utils.make_batch(tokenizer, batch, trigger_tokens, prompt_format, args.use_ctx, device)
             # Don't compute gradient to save memory
             with torch.no_grad():
-                loss = get_loss(model, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, device)
+                loss = get_loss(model, config, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, device)
                 losses_batch_dev.append(loss.item())
         dev_loss = np.mean(losses_batch_dev)
 
-        # TODO: Print model's prediction on dev sample with current trigger
-        # get_prediction(model, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, device)
+        # Sanity check
+        # if args.debug:
+        print_prediction(model, config, tokenizer, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, device)
 
         # Early stopping on dev set
         if dev_loss < best_dev_loss:
@@ -413,19 +390,11 @@ def run_model(args):
         # Store train loss of last batch, which should be the best because we update the same trigger
         train_losses.append(train_loss)
         dev_losses.append(dev_loss)
-        # Print model prediction on dev data point with current trigger
-        rand_idx = random.randint(0, len(dev_data) - 1) # Follow progress of random dev data pair
-        prompt = build_prompt(tokenizer, dev_data[rand_idx], trigger_tokens, args.use_ctx, prompt_format, masking=True)
-        print('Prompt:', prompt)
-        print('RoBERTa predictions:', roberta.fill_mask(prompt, topk=3))
-        # Sanity check
-        # original_log_probs_list, [token_ids], [masked_indices], _, _ = model.get_batch_generation([[prompt]], try_cuda=False)
-        # print_sentence_predictions(original_log_probs_list[0], token_ids, model.vocab, masked_indices=masked_indices)
-        # get_prediction(model, dev_data[rand_idx], trigger_tokens, trigger_mask, segment_ids, device)
 
+    print('=' * 100)
     print('Best dev loss: {} (iter {})'.format(round(best_dev_loss, 3), best_iter))
     # print('Best trigger: ', ' '.join(tokenizer.convert_ids_to_tokens(best_trigger_tokens)))
-    print('Best prompt: {}'.format(build_prompt_final(tokenizer, best_trigger_tokens, prompt_format)))
+    print('Best prompt: {}'.format(build_prompt(config, tokenizer, best_trigger_tokens, prompt_format)))
 
     # Measure elapsed time
     end = time.time()

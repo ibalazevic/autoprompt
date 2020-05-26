@@ -57,7 +57,7 @@ def load_TREx_data(args, filename, tokenizer):
                     masked_sent = ' '.join(words[:constants.MAX_CONTEXT_LEN])
                 
                 # If truncated context sentence still has MASK, we need to replace it with object surface but if it left out MASK, it's fine
-                context = masked_sent.replace(constants.MASK, obj_surface)
+                context = masked_sent.replace('[MASK]', obj_surface)
                 facts.append((sub_label, obj_label, context))
             else:
                 # Facts only consist of sub and obj for unconditional probing
@@ -97,10 +97,10 @@ def make_batch(tokenizer, batch, trigger_tokens, prompt_format, use_ctx, device)
     trigger_mask_batch = []
     segment_ids_batch = []
 
-    cls_token = tokenizer.encode(tokenizer.cls_token, add_special_tokens=False)
-    sep_token = tokenizer.encode(tokenizer.sep_token, add_special_tokens=False)
-    mask_token = tokenizer.encode(tokenizer.mask_token, add_special_tokens=False)
-    pad_token = tokenizer.encode(tokenizer.pad_token, add_special_tokens=False)
+    cls_token = [tokenizer.cls_token_id]
+    sep_token = [tokenizer.sep_token_id]
+    mask_token = [tokenizer.mask_token_id]
+    pad_token = [tokenizer.pad_token_id]
     period_token = tokenizer.encode('.', add_special_tokens=False)
     
     for sample in batch:
@@ -111,13 +111,13 @@ def make_batch(tokenizer, batch, trigger_tokens, prompt_format, use_ctx, device)
 
         if use_ctx:
             sub, obj, ctx = sample
-            sub_tokens = tokenizer.encode(sub, add_special_tokens=False, add_prefix_space=False)
-            obj_tokens = tokenizer.encode(obj, add_special_tokens=False, add_prefix_space=False)
-            ctx_tokens = tokenizer.encode(ctx, add_special_tokens=False, add_prefix_space=False)
+            sub_tokens = tokenizer.encode(sub, add_special_tokens=False, add_prefix_space=True)
+            obj_tokens = tokenizer.encode(obj, add_special_tokens=False, add_prefix_space=True)
+            ctx_tokens = tokenizer.encode(ctx, add_special_tokens=False, add_prefix_space=True)
         else:
             sub, obj = sample
-            sub_tokens = tokenizer.encode(sub, add_special_tokens=False, add_prefix_space=False)
-            obj_tokens = tokenizer.encode(obj, add_special_tokens=False, add_prefix_space=False)
+            sub_tokens = tokenizer.encode(sub, add_special_tokens=False, add_prefix_space=True)
+            obj_tokens = tokenizer.encode(obj, add_special_tokens=False, add_prefix_space=True)
 
         trigger_idx = 0
         # Add CLS token at the beginning
