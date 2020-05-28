@@ -1,7 +1,7 @@
 import os
 import json
 import argparse
-import constants
+import main.constants as constants
 
 
 def main(args):
@@ -20,17 +20,19 @@ def main(args):
     filepath = os.path.join(args.out_dir, 'relations.jsonl')
     filepath_L = os.path.join(args.out_dir, 'relations_latex.jsonl') # Latex version
     with open(filepath, encoding='utf-8', mode='w+') as f_out, open(filepath_L, encoding='utf-8', mode='w+') as f_out_L:
+        # TODO: FIX TEMP THING
         for rel_id in constants.TREX_RELATIONS_ORDERED:
-            # prompt = rel_to_prompt[rel_id].replace(' ##', '').replace('##', '')
-            # prompt_L = rel_to_prompt[rel_id].replace('#', '\#')
-            f_out.write(json.dumps({
-                'relation': rel_id,
-                'template': rel_to_prompt[rel_id].replace(' ##', '').replace('##', '')
-            }, ensure_ascii=False) + '\n')
-            f_out_L.write(json.dumps({
-                'relation': rel_id,
-                'template': rel_to_prompt[rel_id] # .replace('##', '\#\#')
-            }, ensure_ascii=False) + '\n')
+            try:
+                f_out.write(json.dumps({
+                    'relation': rel_id,
+                    'template': rel_to_prompt[rel_id].replace(' ##', '').replace('##', '')
+                }, ensure_ascii=False) + '\n')
+                f_out_L.write(json.dumps({
+                    'relation': rel_id,
+                    'template': rel_to_prompt[rel_id] # .replace('##', '\#\#')
+                }, ensure_ascii=False) + '\n')
+            except Exception as e:
+                print('Error:', e)
 
 
 if __name__ == '__main__':

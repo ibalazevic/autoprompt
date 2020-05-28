@@ -2,10 +2,13 @@ import os
 import json
 import random
 import argparse
-import utils
+from transformers import RobertaTokenizer
+import main.utils
 
 
 def main(args):
+    tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
+
     for f in os.listdir(args.in_dir):
         filename = os.fsdecode(f)
         if filename.endswith('.jsonl'):
@@ -22,7 +25,10 @@ def main(args):
                 lines = f_in.readlines()
                 for line in lines:
                     sample = json.loads(line)
-                    samples.append(sample)
+                    obj_label = sample['obj_label']
+                    obj_label_rob = ' ' + str(obj_label).strip()
+                    if len(tokenizer.tokenize(obj_label_rob)) == 1:
+                        samples.append(sample)
 
             # Subsample
             with open(filepath_out, 'w+') as f_out:
@@ -31,6 +37,7 @@ def main(args):
                 else:
                     count = args.count
                 subsample = random.sample(samples, count)
+                print('Num samples in {}: {}'.format(rel_id, len(subsample)))
                 for s in subsample:
                     f_out.write(json.dumps(s) + '\n')
 

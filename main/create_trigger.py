@@ -13,8 +13,8 @@ import torch.nn.functional as F
 from copy import deepcopy
 from operator import itemgetter
 from transformers import AutoConfig, AutoModelWithLMHead, AutoTokenizer
-import constants
-import utils
+import main.constants as constants
+import main.utils as utils
 
 nlp = spacy.load("en_core_web_sm")
 
@@ -227,6 +227,8 @@ def run_model(args):
     dev_data = utils.load_TREx_data(args, dev_file, tokenizer)
     print('Num samples in dev data: {}'.format(len(dev_data)))
 
+    assert len(train_data) > 0 and len(dev_data) > 0
+
     # Get all unique objects from train data and check if hotflip candidates == object later on
     unique_objects = utils.get_unique_objects(train_data, args.use_ctx)
     print('Unique objects:', unique_objects)
@@ -257,10 +259,6 @@ def run_model(args):
         trigger_tokens = tokenizer.convert_tokens_to_ids(init_tokens)
     else:
         print('Trigger initialization: RANDOM')
-        # TODO: figure out how to properly initialize random trigger!!!!!!!!!!!!!!!!!
-        # init_token = tokenizer.convert_tokens_to_ids([constants.INIT_WORD])[0]
-        # trigger_tokens = np.array([init_token] * trigger_token_length)
-        # trigger_tokens = tokenizer.encode([constants.INIT_WORD] * trigger_token_length, add_special_tokens=False, add_prefix_space=True)
         trigger_tokens = tokenizer.encode(' '.join([constants.INIT_WORD] * trigger_token_length), add_special_tokens=False, add_prefix_space=True)
     print('Initial trigger tokens: {}, Length: {}'.format(trigger_tokens, trigger_token_length))
 
@@ -400,6 +398,7 @@ def run_model(args):
     end = time.time()
     print('Elapsed time: {} sec'.format(end - start))
 
+    """
     # Plot loss/learning curve
     num_iters = len(train_losses)
     plt.plot(range(num_iters), train_losses)
@@ -408,6 +407,7 @@ def run_model(args):
     plt.ylabel('Loss')
     plt.legend(['Train', 'Dev'])
     plt.savefig(os.path.join(args.out_dir, 'loss.png'))
+    """
 
 
 if __name__ == '__main__':

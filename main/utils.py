@@ -6,8 +6,7 @@ import asyncio
 import numpy as np
 import torch
 from copy import deepcopy
-from pytorch_transformers import BertTokenizer
-import constants
+import main.constants as constants
 
 # Set random seed so randomly picking context sentences is consistent across runs
 random.seed(0)
@@ -38,10 +37,10 @@ def load_TREx_data(args, filename, tokenizer):
             obj_label = sample['obj_label']
 
             # Skip facts with objects that consist of multiple tokens
-            if len(tokenizer.tokenize(obj_label)) != 1:
-                # print(tokenizer.tokenize(obj_label))
-                num_invalid_facts += 1
-                continue
+            # if len(tokenizer.tokenize(obj_label)) != 1:
+            #     print(tokenizer.tokenize(obj_label))
+            #     num_invalid_facts += 1
+            #     continue
 
             if args.use_ctx:
                 # For conditional probing, skip facts that don't have context sentence
