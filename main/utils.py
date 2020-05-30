@@ -192,8 +192,8 @@ def make_batch(tokenizer, batch, trigger_tokens, prompt_format, use_ctx, device)
     segment_ids_batch = torch.nn.utils.rnn.pad_sequence(segment_ids_batch, batch_first=True, padding_value=pad_token[0])
 
     # Create attention mask that makes sure that padding is not attended to by the model
-    attention_mask_batch = source_tokens_batch.clone()
-    attention_mask_batch[attention_mask_batch != pad_token[0]] = 1
+    attention_mask_batch = torch.zeros_like(source_tokens_batch)
+    attention_mask_batch[source_tokens_batch != pad_token[0]] = 1
 
     # Move to GPU
     source_tokens_batch = source_tokens_batch.to(device)

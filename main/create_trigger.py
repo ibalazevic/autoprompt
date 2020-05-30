@@ -253,6 +253,7 @@ def run_model(args):
     trigger_token_length = sum([int(x) for x in prompt_format if x.isdigit()])
     if args.manual:
         print('Trigger initialization: MANUAL')
+        # TODO: use encode function instead of convert_tokens_to_ids + tokenize
         init_trigger = args.manual
         init_tokens = tokenizer.tokenize(init_trigger)
         trigger_token_length = len(init_tokens)
@@ -262,7 +263,7 @@ def run_model(args):
         trigger_tokens = tokenizer.encode(' '.join([constants.INIT_WORD] * trigger_token_length), add_special_tokens=False, add_prefix_space=True)
     print('Initial trigger tokens: {}, Length: {}'.format(trigger_tokens, trigger_token_length))
 
-    best_dev_loss = 999999
+    best_dev_loss = sys.maxsize
     best_trigger_tokens = None
     best_iter = 0
     train_losses = []
@@ -274,10 +275,12 @@ def run_model(args):
         print('-' * 100)
         print('Iteration: {}'.format(i))
         end_iter = False
-        best_loss_iter = 999999
+        best_loss_iter = sys.maxsize
         counter = 0
-
         losses_batch_train = []
+        is_init_loss = True
+        prev_best_curr_loss = 0
+
         # Full pass over training data set in batches of subject-object-context triplets
         for batch in utils.iterate_batches(train_data, args.bsz, True):
             # Tokenize and pad batch
@@ -287,9 +290,8 @@ def run_model(args):
             # print('TRIGGER MASK:', trigger_mask, trigger_mask.size())
             # print('SEGMENT IDS:', segment_ids, segment_ids.size())
             # print('ATTENTION MASK:', attention_mask, attention_mask.size())
-
+            
             # Iteratively update tokens in the trigger
-            prev_best_curr_loss = 0
             for token_to_flip in range(trigger_token_length):
                 # Early stopping if no improvements to trigger
                 if end_iter:
@@ -298,6 +300,11 @@ def run_model(args):
                 model.zero_grad() # clear previous gradients
                 loss = get_loss(model, config, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, device)
                 loss.backward() # compute derivative of loss w.r.t. params using backprop
+
+                # Save initial loss of current iteration
+                if is_init_loss:
+                    prev_best_curr_loss = loss.item()
+                    is_init_loss = False
 
                 global extracted_grads
                 grad = extracted_grads[0]
@@ -352,6 +359,9 @@ def run_model(args):
                 if args.debug:
                     input()
 
+            # For testing purposes
+            # print_prediction(model, config, tokenizer, source_tokens, target_tokens, trigger_tokens, trigger_mask, segment_ids, attention_mask, device)
+
         # Get best train loss across all batches
         train_loss = best_loss_iter
 
@@ -398,8 +408,8 @@ def run_model(args):
     end = time.time()
     print('Elapsed time: {} sec'.format(end - start))
 
-    """
     # Plot loss/learning curve
+    os.makedirs(args.out_dir, exist_ok=True)
     num_iters = len(train_losses)
     plt.plot(range(num_iters), train_losses)
     plt.plot(range(num_iters), dev_losses)
@@ -407,7 +417,6 @@ def run_model(args):
     plt.ylabel('Loss')
     plt.legend(['Train', 'Dev'])
     plt.savefig(os.path.join(args.out_dir, 'loss.png'))
-    """
 
 
 if __name__ == '__main__':
