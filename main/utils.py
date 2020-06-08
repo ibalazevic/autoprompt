@@ -6,6 +6,7 @@ import asyncio
 import numpy as np
 import torch
 from copy import deepcopy
+from collections import defaultdict
 import main.constants as constants
 
 # Set random seed so randomly picking context sentences is consistent across runs
@@ -28,6 +29,9 @@ async def map_async(fn, iterator, max_tasks=10, sleep_time=0.01):
 
 def load_TREx_data(args, filename, tokenizer):
     facts = []
+    # For synthetic object training, we need to replace obj_label with another obj_label, and replace obj_surface with a surface form of the new obj_label
+    unique_objs_dict = defaultdict(list)
+
     with open(filename, newline='') as f:
         lines = f.readlines()
         num_invalid_facts = 0
@@ -36,31 +40,52 @@ def load_TREx_data(args, filename, tokenizer):
             sub_label = sample['sub_label']
             obj_label = sample['obj_label']
 
-            # Skip facts with objects that consist of multiple tokens
-            # if len(tokenizer.tokenize(obj_label)) != 1:
-            #     print(tokenizer.tokenize(obj_label))
-            #     num_invalid_facts += 1
-            #     continue
-
             if args.use_ctx:
                 # For conditional probing, skip facts that don't have context sentence
                 if 'evidences' not in sample:
                     num_invalid_facts += 1
                     continue
+
                 evidences = sample['evidences']
+
+                # Gather all UNIQUE objects and their surface forms if synthetic training
+                if args.synth:
+                    for evidence in evidences:
+                        obj_surface = evidence['obj_surface']
+                        masked_sent = evidence['masked_sentence']
+                        unique_objs_dict[obj_label].append(obj_surface)
+                    
                 # Randomly pick a context sentence
                 obj_surface, masked_sent = random.choice([(evidence['obj_surface'], evidence['masked_sentence']) for evidence in evidences])
                 words = masked_sent.split()
                 if len(words) > constants.MAX_CONTEXT_LEN:
-                    # If the masked sentence is too long, use the first X tokens (it's ok if obj isn't included)
+                    # If the masked sentence is too long, use the first X tokens. For training we want to keep as many samples as we can.
                     masked_sent = ' '.join(words[:constants.MAX_CONTEXT_LEN])
                 
-                # If truncated context sentence still has MASK, we need to replace it with object surface but if it left out MASK, it's fine
-                context = masked_sent.replace('[MASK]', obj_surface)
-                facts.append((sub_label, obj_label, context))
+                if args.synth:
+                    facts.append((sub_label, obj_label, masked_sent))
+                else:
+                    # If truncated context sentence still has MASK, we need to replace it with object surface
+                    context = masked_sent.replace('[MASK]', obj_surface)
+                    facts.append((sub_label, obj_label, context))
             else:
                 # Facts only consist of sub and obj for unconditional probing
                 facts.append((sub_label, obj_label))
+
+        # Go through all facts and replace each object with a new one. Also insert the new object (surface form) into the masked sentence
+        if args.synth:
+            synth_facts = []
+            for fact in facts:
+                (sub_label, obj_label, masked_sent) = fact
+                # print('Original fact: ({}, {}, {})'.format(sub_label, obj_label, masked_sent))
+                synth_obj_label = random.choice([x for x in unique_objs_dict.keys() if x != obj_label])
+                synth_obj_surface = random.choice(unique_objs_dict[synth_obj_label])
+                synth_ctx = masked_sent.replace('[MASK]', synth_obj_surface)
+                # print('Synthetic fact: ({}, {}, {})'.format(sub_label, synth_obj_label, synth_ctx))
+                synth_facts.append((sub_label, synth_obj_label, synth_ctx))
+
+            # Replace facts with synthetic facts
+            facts = synth_facts
 
         print('Total facts before:', len(lines))
         print('Invalid facts:', num_invalid_facts)

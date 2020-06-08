@@ -425,6 +425,7 @@ if __name__ == '__main__':
     parser.add_argument('out_dir', type=str)
     parser.add_argument('--model_name', type=str, default='bert-base-cased', help='Model name passed to HuggingFace AutoX classes')
     parser.add_argument('--use_ctx', action='store_true', help='Use context sentences for open-book probing')
+    parser.add_argument('--synth', action='store_true', help='Generate triggers with synthetic objects (swapping objects with other, random objects)')
     parser.add_argument('--iters', type=int, default='100', help='Number of iterations to run trigger search algorithm')
     parser.add_argument('--bsz', type=int, default=32, help='Batch size')
     parser.add_argument('--patience', type=int, default=5)

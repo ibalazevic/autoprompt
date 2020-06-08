@@ -71,10 +71,47 @@ def trim_dataset(args):
     print('Num samples after trimming:', after_total)
 
 
+def clean_dataset(args):
+    """
+    Remove sentences and only include id and triple info
+    """
+    # Make out dir if it doesn't exist
+    os.makedirs(args.out_dir, exist_ok=True)
+    
+    for f in os.listdir(args.data_dir):
+        filename = os.fsdecode(f)
+        if filename.endswith('.jsonl'):
+            rel_id = os.path.basename(filename).replace('.jsonl', '')
+            filepath_in = os.path.join(args.data_dir, filename)
+            samples = []
+            with open(filepath_in, 'r') as f_in:
+                lines = f_in.readlines()
+                for line in tqdm(lines):
+                    sample = json.loads(line)
+                    obj_uri = sample['obj_uri']
+                    obj_label = sample['obj_label']
+                    sub_uri = sample['sub_uri']
+                    sub_label = sample['sub_label']
+                    predicate_id = sample['predicate_id']
+                    samples.append({
+                        'obj_uri': obj_uri,
+                        # 'obj_label': obj_label,
+                        'sub_uri': sub_uri,
+                        # 'sub_label': sub_label,
+                        # 'predicate_id': predicate_id
+                    })
+
+            filepath_out = os.path.join(args.out_dir, rel_id + '.jsonl')
+            with open(filepath_out, 'w+') as f_out:
+                for sample in samples:
+                    f_out.write(json.dumps(sample) + '\n')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Get the intersection of common vocab and RoBERTa vocab')
     parser.add_argument('data_dir', type=str, help='Directory containing TREx test set')
-    parser.add_argument('blacklist_dir', type=str, help='Blacklist that contains facts that should be filtered out')
     parser.add_argument('out_dir', type=str, help='Directory to store trimmed dataset')
+    parser.add_argument('--blacklist_dir', type=str, help='Blacklist that contains facts that should be filtered out')
     args = parser.parse_args()
-    trim_dataset(args)
+    # trim_dataset(args)
+    clean_dataset(args)
